@@ -242,10 +242,12 @@ def simclr_loss_vectorized(out_left, out_right, tau):
     exp_matrix = torch.exp(sim_matrix / tau)
 
     # This binary mask zeros out terms where k=i.
-    mask = torch.eye(2*N, dtype=torch.bool)
+    mask = ~torch.eye(2*N, dtype=torch.bool, device=device)
     
     # We apply the binary mask.
-    exp_matrix[mask] = 0
+    exp_matrix = exp_matrix * mask
+    # exp_matrix[mask] = 0
+
     
     # Hint: Compute the denominator values for all augmented samples. This should be a 2N x 1 vector.
     denominator = torch.sum(exp_matrix, dim=1)
@@ -361,7 +363,6 @@ class CIFAR10Pair(CIFAR10):
             # Apply self.transform to the image to produce x_i and x_j in the paper #
             ##############################################################################
 
-            # TODO: (ALEX) Unsure, but should probably be right?
             x_i = self.transform(img)
             x_j = self.transform(img)
 
@@ -420,18 +421,16 @@ class SimCLR(pl.LightningModule):
         ########
         # TODO #
         ########
-        # TODO: (ALEX) Pretty safe that this is wrong
-        acc_1 = torchmetrics.Accuracy(top_k=1).to(device)
-        acc_5 = torchmetrics.Accuracy(top_k=5).to(device)
-        
-        # proj_left = torch.argmax(proj_left, dim=0)
-        proj_right = torch.argmax(proj_right, dim=-1)
 
-        top1_acc = acc_1(proj_left, proj_right)
-        top5_acc = acc_5(proj_left, proj_right)
-        
+        sim_matrix = compute_sim_matrix(torch.cat([proj_left, proj_right]))
+        sim_matrix.fill_diagonal_(float("-inf"))
+
+        target = torch.cat([torch.arange(N, 2*N), torch.arange(0, N)]).to(device)
+
+        top1_acc = sum(torch.argmax(sim_matrix, dim=-1) == target).float().item() / (2*N)
+        top5_acc = sum([target[i] in torch.topk(sim_matrix, k=5, dim=-1).indices[i] for i in range(2*N)]) / (2*N)
+ 
         # Compute top1 and top5 accuracy of how often any element was correctly predicted (resp. whether it was in top 5 predictions)
-
         return top1_acc, top5_acc
 
     def training_step(self, x):
@@ -471,12 +470,12 @@ projection_feature_dim = 128
 
 simclr_model = SimCLR(encoder, temperature, encoder_feature_dim, projection_feature_dim)
 simclr_logger = pl.loggers.TensorBoardLogger("simclr_logs", name="simclr_lr_" + str(simclr_model.learning_rate) + "_temp_" + str(simclr_model.tau) + "_batch_size_" + str(batch_size))
-simclr_trainer = pl.Trainer(logger=simclr_logger, accelerator="auto", devices=1, max_epochs=500)
+simclr_trainer = pl.Trainer(logger=simclr_logger, accelerator="auto", devices=1, max_epochs=200)
 simclr_trainer.fit(simclr_model, pair_train_loader)
 #simclr_trainer.test(model, test_loader)
 
 # save model for later reuse
-model_save_path = 'resnet50_simclr_pretrained'
+model_save_path = 'resnet50_simclr_pretrained_ad_2'
 torch.save(simclr_model.encoder.state_dict(), model_save_path)
 
 # We will train a classification head on the pre-trained model
